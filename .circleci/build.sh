@@ -10,6 +10,9 @@ TANGGAL=$(date +"%F-%S")
 START=$(date +"%s")
 export CONFIG_PATH=$PWD/arch/arm64/configs/lavender-perf_defconfig
 PATH="${PWD}/clang/bin:$PATH"
+CLANG_BIN="${CLANG_DIR}/bin"
+expot CLANG_DIR="clang"
+export LD="${CLANG_BIN}/ld.lld"
 export ARCH=arm64
 export KBUILD_BUILD_HOST=NotKernel
 export KBUILD_BUILD_USER="root"
@@ -51,6 +54,7 @@ function compile() {
    make O=out ARCH=arm64 lavender-perf_defconfig
        make -j$(nproc --all) O=out \
                              ARCH=arm64 \
+                             LD="${LD}" \
 			     CC=clang \
 			     CROSS_COMPILE=aarch64-linux-gnu- \
 			     CROSS_COMPILE_ARM32=arm-linux-gnueabi-
