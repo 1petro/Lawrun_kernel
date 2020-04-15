@@ -29,7 +29,6 @@
 #include <linux/seqlock.h>
 #include <linux/swait.h>
 #include <linux/stop_machine.h>
-#include "rcu_segcblist.h"
 
 /*
  * Define shape of hierarchy based on NR_CPUS, CONFIG_RCU_FANOUT, and
@@ -147,8 +146,9 @@ struct rcu_dynticks {
  * Definition for node within the RCU grace-period-detection hierarchy.
  */
 struct rcu_node {
-	raw_spinlock_t lock;	/* Root rcu_node's lock protects some */
-				/*  rcu_state fields as well as following. */
+	raw_spinlock_t __private lock;	/* Root rcu_node's lock protects */
+					/*  some rcu_state fields as well as */
+					/*  following. */
 	unsigned long gpnum;	/* Current grace period for this node. */
 				/*  This will either be equal to or one */
 				/*  behind the root rcu_node's gpnum. */
@@ -335,9 +335,34 @@ struct rcu_data {
 					/* period it is aware of. */
 
 	/* 2) batch handling */
-	struct rcu_segcblist cblist;	/* Segmented callback list, with */
-					/* different callbacks waiting for */
-					/* different grace periods. */
+	/*
+	 * If nxtlist is not NULL, it is partitioned as follows.
+	 * Any of the partitions might be empty, in which case the
+	 * pointer to that partition will be equal to the pointer for
+	 * the following partition.  When the list is empty, all of
+	 * the nxttail elements point to the ->nxtlist pointer itself,
+	 * which in that case is NULL.
+	 *
+	 * [nxtlist, *nxttail[RCU_DONE_TAIL]):
+	 *	Entries that batch # <= ->completed
+	 *	The grace period for these entries has completed, and
+	 *	the other grace-period-completed entries may be moved
+	 *	here temporarily in rcu_process_callbacks().
+	 * [*nxttail[RCU_DONE_TAIL], *nxttail[RCU_WAIT_TAIL]):
+	 *	Entries that batch # <= ->completed - 1: waiting for current GP
+	 * [*nxttail[RCU_WAIT_TAIL], *nxttail[RCU_NEXT_READY_TAIL]):
+	 *	Entries known to have arrived before current GP ended
+	 * [*nxttail[RCU_NEXT_READY_TAIL], *nxttail[RCU_NEXT_TAIL]):
+	 *	Entries that might have arrived after current GP ended
+	 *	Note that the value of *nxttail[RCU_NEXT_TAIL] will
+	 *	always be NULL, as this is the end of the list.
+	 */
+	struct rcu_head *nxtlist;
+	struct rcu_head **nxttail[RCU_NEXT_SIZE];
+	unsigned long	nxtcompleted[RCU_NEXT_SIZE];
+					/* grace periods for sublists. */
+	long		qlen_lazy;	/* # of lazy queued callbacks */
+	long		qlen;		/* # of queued callbacks, incl lazy */
 	long		qlen_last_fqs_check;
 					/* qlen at last check for QS forcing */
 	unsigned long	n_cbs_invoked;	/* count of RCU cbs invoked. */
@@ -475,11 +500,14 @@ struct rcu_state {
 
 	raw_spinlock_t orphan_lock ____cacheline_internodealigned_in_smp;
 						/* Protect following fields. */
-	struct rcu_cblist orphan_pend;		/* Orphaned callbacks that */
+	struct rcu_head *orphan_nxtlist;	/* Orphaned callbacks that */
 						/*  need a grace period. */
-	struct rcu_cblist orphan_done;		/* Orphaned callbacks that */
+	struct rcu_head **orphan_nxttail;	/* Tail of above. */
+	struct rcu_head *orphan_donelist;	/* Orphaned callbacks that */
 						/*  are ready to invoke. */
-						/* (Contains counts.) */
+	struct rcu_head **orphan_donetail;	/* Tail of above. */
+	long qlen_lazy;				/* Number of lazy callbacks. */
+	long qlen;				/* Total number of callbacks. */
 	/* End of fields guarded by orphan_lock. */
 
 	struct mutex barrier_mutex;		/* Guards barrier fields. */
@@ -671,7 +699,7 @@ static inline void rcu_nocb_q_lengths(struct rcu_data *rdp, long *ql, long *qll)
 #endif /* #else #ifdef CONFIG_PPC */
 
 /*
- * Wrappers for the rcu_node::lock acquire.
+ * Wrappers for the rcu_node::lock acquire and release.
  *
  * Because the rcu_nodes form a tree, the tree traversal locking will observe
  * different lock values, this in turn means that an UNLOCK of one level
@@ -680,29 +708,48 @@ static inline void rcu_nocb_q_lengths(struct rcu_data *rdp, long *ql, long *qll)
  *
  * In order to restore full ordering between tree levels, augment the regular
  * lock acquire functions with smp_mb__after_unlock_lock().
+ *
+ * As ->lock of struct rcu_node is a __private field, therefore one should use
+ * these wrappers rather than directly call raw_spin_{lock,unlock}* on ->lock.
  */
 static inline void raw_spin_lock_rcu_node(struct rcu_node *rnp)
 {
-	raw_spin_lock(&rnp->lock);
+	raw_spin_lock(&ACCESS_PRIVATE(rnp, lock));
 	smp_mb__after_unlock_lock();
+}
+
+static inline void raw_spin_unlock_rcu_node(struct rcu_node *rnp)
+{
+	raw_spin_unlock(&ACCESS_PRIVATE(rnp, lock));
 }
 
 static inline void raw_spin_lock_irq_rcu_node(struct rcu_node *rnp)
 {
-	raw_spin_lock_irq(&rnp->lock);
+	raw_spin_lock_irq(&ACCESS_PRIVATE(rnp, lock));
 	smp_mb__after_unlock_lock();
 }
 
-#define raw_spin_lock_irqsave_rcu_node(rnp, flags)	\
-do {							\
-	typecheck(unsigned long, flags);		\
-	raw_spin_lock_irqsave(&(rnp)->lock, flags);	\
-	smp_mb__after_unlock_lock();			\
+static inline void raw_spin_unlock_irq_rcu_node(struct rcu_node *rnp)
+{
+	raw_spin_unlock_irq(&ACCESS_PRIVATE(rnp, lock));
+}
+
+#define raw_spin_lock_irqsave_rcu_node(rnp, flags)			\
+do {									\
+	typecheck(unsigned long, flags);				\
+	raw_spin_lock_irqsave(&ACCESS_PRIVATE(rnp, lock), flags);	\
+	smp_mb__after_unlock_lock();					\
+} while (0)
+
+#define raw_spin_unlock_irqrestore_rcu_node(rnp, flags)			\
+do {									\
+	typecheck(unsigned long, flags);				\
+	raw_spin_unlock_irqrestore(&ACCESS_PRIVATE(rnp, lock), flags);	\
 } while (0)
 
 static inline bool raw_spin_trylock_rcu_node(struct rcu_node *rnp)
 {
-	bool locked = raw_spin_trylock(&rnp->lock);
+	bool locked = raw_spin_trylock(&ACCESS_PRIVATE(rnp, lock));
 
 	if (locked)
 		smp_mb__after_unlock_lock();

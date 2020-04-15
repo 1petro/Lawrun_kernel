@@ -121,11 +121,14 @@ EXPORT_SYMBOL(rcu_read_lock_sched_held);
  * Should expedited grace-period primitives always fall back to their
  * non-expedited counterparts?  Intended for use within RCU.  Note
  * that if the user specifies both rcu_expedited and rcu_normal, then
- * rcu_normal wins.
+ * rcu_normal wins.  (Except during the time period during boot from
+ * when the first task is spawned until the rcu_exp_runtime_mode()
+ * core_initcall() is invoked, at which point everything is expedited.)
  */
 bool rcu_gp_is_normal(void)
 {
-	return READ_ONCE(rcu_normal);
+	return READ_ONCE(rcu_normal) &&
+	       rcu_scheduler_active != RCU_SCHEDULER_INIT;
 }
 EXPORT_SYMBOL_GPL(rcu_gp_is_normal);
 
@@ -134,13 +137,14 @@ static atomic_t rcu_expedited_nesting = ATOMIC_INIT(1);
 /*
  * Should normal grace-period primitives be expedited?  Intended for
  * use within RCU.  Note that this function takes the rcu_expedited
- * sysfs/boot variable into account as well as the rcu_expedite_gp()
- * nesting.  So looping on rcu_unexpedite_gp() until rcu_gp_is_expedited()
- * returns false is a -really- bad idea.
+ * sysfs/boot variable and rcu_scheduler_active into account as well
+ * as the rcu_expedite_gp() nesting.  So looping on rcu_unexpedite_gp()
+ * until rcu_gp_is_expedited() returns false is a -really- bad idea.
  */
 bool rcu_gp_is_expedited(void)
 {
-	return rcu_expedited || atomic_read(&rcu_expedited_nesting);
+	return rcu_expedited || atomic_read(&rcu_expedited_nesting) ||
+	       rcu_scheduler_active == RCU_SCHEDULER_INIT;
 }
 EXPORT_SYMBOL_GPL(rcu_gp_is_expedited);
 
@@ -255,7 +259,7 @@ EXPORT_SYMBOL_GPL(rcu_callback_map);
 
 int notrace debug_lockdep_rcu_enabled(void)
 {
-	return rcu_scheduler_active && debug_locks &&
+	return rcu_scheduler_active != RCU_SCHEDULER_INACTIVE && debug_locks &&
 	       current->lockdep_recursion == 0;
 }
 EXPORT_SYMBOL_GPL(debug_lockdep_rcu_enabled);
@@ -377,29 +381,9 @@ void destroy_rcu_head(struct rcu_head *head)
 	debug_object_free(head, &rcuhead_debug_descr);
 }
 
-/*
- * fixup_activate is called when:
- * - an active object is activated
- * - an unknown object is activated (might be a statically initialized object)
- * Activation is performed internally by call_rcu().
- */
-static bool rcuhead_fixup_activate(void *addr, enum debug_obj_state state)
+static bool rcuhead_is_static_object(void *addr)
 {
-	struct rcu_head *head = addr;
-
-	switch (state) {
-
-	case ODEBUG_STATE_NOTAVAILABLE:
-		/*
-		 * This is not really a fixup. We just make sure that it is
-		 * tracked in the object tracker.
-		 */
-		debug_object_init(head, &rcuhead_debug_descr);
-		debug_object_activate(head, &rcuhead_debug_descr);
-		return false;
-	default:
-		return true;
-	}
+	return true;
 }
 
 /**
@@ -437,7 +421,7 @@ EXPORT_SYMBOL_GPL(destroy_rcu_head_on_stack);
 
 struct debug_obj_descr rcuhead_debug_descr = {
 	.name = "rcu_head",
-	.fixup_activate = rcuhead_fixup_activate,
+	.is_static_object = rcuhead_is_static_object,
 };
 EXPORT_SYMBOL_GPL(rcuhead_debug_descr);
 #endif /* #ifdef CONFIG_DEBUG_OBJECTS_RCU_HEAD */
@@ -609,7 +593,7 @@ EXPORT_SYMBOL_GPL(call_rcu_tasks);
 void synchronize_rcu_tasks(void)
 {
 	/* Complain if the scheduler has not started.  */
-	RCU_LOCKDEP_WARN(!rcu_scheduler_active,
+	RCU_LOCKDEP_WARN(rcu_scheduler_active == RCU_SCHEDULER_INACTIVE,
 			 "synchronize_rcu_tasks called too soon");
 
 	/* Wait for the grace period. */
@@ -670,7 +654,6 @@ static int __noreturn rcu_tasks_kthread(void *arg)
 	struct rcu_head *list;
 	struct rcu_head *next;
 	LIST_HEAD(rcu_tasks_holdouts);
-	int fract;
 
 	/* Run on housekeeping CPUs by default.  Sysadm can move if desired. */
 	housekeeping_affine(current);
@@ -752,25 +735,13 @@ static int __noreturn rcu_tasks_kthread(void *arg)
 		 * holdouts.  When the list is empty, we are done.
 		 */
 		lastreport = jiffies;
-
-		/* Start off with HZ/10 wait and slowly back off to 1 HZ wait*/
-		fract = 10;
-
-		for (;;) {
+		while (!list_empty(&rcu_tasks_holdouts)) {
 			bool firstreport;
 			bool needreport;
 			int rtst;
 			struct task_struct *t1;
 
-			if (list_empty(&rcu_tasks_holdouts))
-				break;
-
-			/* Slowly back off waiting for holdouts */
-			schedule_timeout_interruptible(HZ/fract);
-
-			if (fract > 1)
-				fract--;
-
+			schedule_timeout_interruptible(HZ);
 			rtst = READ_ONCE(rcu_task_stall_timeout);
 			needreport = rtst > 0 &&
 				     time_after(jiffies, lastreport + rtst);
@@ -844,6 +815,23 @@ static void rcu_spawn_tasks_kthread(void)
 
 #endif /* #ifdef CONFIG_TASKS_RCU */
 
+/*
+ * Test each non-SRCU synchronous grace-period wait API.  This is
+ * useful just after a change in mode for these primitives, and
+ * during early boot.
+ */
+void rcu_test_sync_prims(void)
+{
+	if (!IS_ENABLED(CONFIG_PROVE_RCU))
+		return;
+	synchronize_rcu();
+	synchronize_rcu_bh();
+	synchronize_sched();
+	synchronize_rcu_expedited();
+	synchronize_rcu_bh_expedited();
+	synchronize_sched_expedited();
+}
+
 #ifdef CONFIG_PROVE_RCU
 
 /*
@@ -896,6 +884,7 @@ void rcu_early_boot_tests(void)
 		early_boot_test_call_rcu_bh();
 	if (rcu_self_test_sched)
 		early_boot_test_call_rcu_sched();
+	rcu_test_sync_prims();
 }
 
 static int rcu_verify_early_boot_tests(void)
