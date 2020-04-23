@@ -1,0 +1,43 @@
+Change Log V-1 
+
++ Kcal & Klapse Support
++ Cpu idle Improvements
++ Miui Support (Still No cam in miui Q)
++ Cpu add 5 New Frequency and uc 300Hz Oc 2457Hz
++ Add Support For Spectrum and morpho app
++ Display oc 65Hz For Tinama (Tested) and 62Hz For Boe And shenchao(Untested)
++ Enable Ulps
++ Enable Dynamic Fps Support
++ Fast Charge To 2400 Ma
++ Nethunter Support (untested zip) and add iwpriv binary and ported Mon0 monitor for Wlan0 (mon0en to active ,mon0dis To disable)
++ Built Using Clang-10 With Thin-lto Support
++ F2fs Support (Look For F2fs Patch)
++ Undervolt by 80mV
++ Scheduler improvements
++ System wide power efficient workque
++ Sound control
++ scheduling more power efficient
++ Support for TTL fixation
++ Merged Latest Caf and Upstreamed To Latest-linux Stable 4.4.219
++ CRC and FSYNC Control On/off Toggle 
++ Better Cpu Deep sleep 
++ Dynamic bitclk
++ improvments For Nvt-touch Driver For bitter touch
++ Support (Gpu boost) from Devfreq
+- Reduce Thermal throttling
+- Removed Unnecessary defconfig Lines And Debugging Tracing Logs
++ Support For Fkm( Franco Kernel Manager)
++ Ported Amoled Colours To Lavender (Fkm)
++ Dynamic bitclk support
++ Massive ramdisk changes
++ Lot Of Updates For dts
++ I/O scheduler (cfq ,anxiety ,mapple ,bfq ,zen
++ 
++ Many Opmization and Features :)
+
+POSSIBLE COMING FEATURES :-
+. Gpu oc and uc
+. Fix cam For Miui Q (Camera Q blobs)
+. More Battery Optmizations and Wakelock
+. More Spectrum Optmizations For Better Gaming, perfomance and Battery
+
