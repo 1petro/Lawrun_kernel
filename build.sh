@@ -27,7 +27,7 @@ fi
 if [ "$CC_TOOL" == "2" ]; then
 Cc=clang-$ver
 fi
-###
+###################
 #export CROSS_COMPILE_ARM32=${HOME}/toolchains/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-
 chmod 777 AnyKernel3.zip
 mkdir -p /sdcard/kernel_work/$Device_Name
@@ -149,7 +149,8 @@ fi
 if [ "$choice" == "2" ]; then
 echo -e " \e[34m"
 make CC="ccache $Cc" O=$out $DEFCONFIG $THREAD
-sed '20,30s/^/#/g' -i build.sh; ./build.sh
+sed '20,27s/^/#/g' -i build.sh
+sed '29s/^/#/g' -i build.sh; ./build.sh
 fi
 if [ "$choice" == "3" ]; then
 echo -e " \e[31m"
@@ -169,7 +170,8 @@ fi
 if [ "$choice" == "4" ]; then
 echo "Cleaning Source In Progress..."
 rm -r $out
-sed '20,30s/^/#/g' -i build.sh; ./build.sh
+sed '20,27s/^/#/g' -i build.sh
+sed '29s/^/#/g' -i build.sh; ./build.sh
 fi
 if [ "$choice" == "6" ]; then
 echo -e "[1] make DTS only"
